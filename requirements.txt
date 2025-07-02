@@ -1,0 +1,16 @@
+flask
+pandas
+python-dotenv
+langchain
+langchain_huggingface
+langchain_community
+langchain_groq
+faiss-cpu
+sentence-transformers
+openai
+# For fuzzy matching
+# difflib is part of the Python standard library, so no need to list it
+pypdf2
+pdfplumber
+glob2
+streamlit
