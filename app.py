@@ -712,7 +712,7 @@ def process_query(prompt: str):
             if data:
                 display_vehicle_card(data)
             else:
-                st.warning(f"I'm sorry, I don't have details for '{found_vehicle}' in my current database.")
+                st.warning(f"I'm sorry, I don't have details for '{found_vehicle}' in my current knowledge base.")
             return
         # If vehicle name is part of a longer sentence/question, use description + LLM
         else:
@@ -749,7 +749,7 @@ def process_query(prompt: str):
                 if vehicle:
                     display_vehicle_card(vehicle)
                 else:
-                    st.warning(f"I'm sorry, I don't have details for a vehicle in my current database.")
+                    st.warning(f"I'm sorry, I don't have details for a vehicle in my current knowledge base.")
         else:
             st.warning(f"No vehicles found for brand '{brand.title()}'.")
         return
@@ -765,7 +765,7 @@ def process_query(prompt: str):
             if data:
                 display_vehicle_card(data)
             else:
-                st.warning(f"I'm sorry, I don't have details for '{name}' in my current database.")
+                st.warning(f"I'm sorry, I don't have details for '{name}' in my current knowledge base.")
         return
 
     # 2. Fuzzy matching for close matches (fallback)
@@ -783,7 +783,7 @@ def process_query(prompt: str):
         if data:
             display_vehicle_card(data)
         else:
-            st.warning(f"I'm sorry, I don't have details for '{best_name}' in my current database.")
+            st.warning(f"I'm sorry, I don't have details for '{best_name}' in my current knowledge base.")
         return
     elif close_matches:
         st.write("I found a few possible matches. Please confirm:")
@@ -793,7 +793,7 @@ def process_query(prompt: str):
             if data:
                 display_vehicle_card(data)
             else:
-                st.warning(f"I'm sorry, I don't have details for '{name}' in my current database.")
+                st.warning(f"I'm sorry, I don't have details for '{name}' in my current knowledge base.")
         return
 
     # --- 1. Handle 'most expensive'/'cheapest' queries over the entire dataset ---
