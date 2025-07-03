@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
@@ -12,6 +11,8 @@ import re
 import difflib 
 import random
 import unicodedata
+from sentence_transformers import SentenceTransformer
+from langchain_huggingface import HuggingFaceEmbeddings
 
 import math
 
@@ -56,7 +57,6 @@ def load_data():
 
 @st.cache_resource
 def get_vector_store(_df_main, _df_qna):
-    # Use st.spinner for a better user experience during long operations
     with st.spinner("Initializing knowledge base... this may take a moment."):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         docs = []
@@ -69,11 +69,9 @@ def get_vector_store(_df_main, _df_qna):
             docs.append(text)
         for _, row in _df_qna.iterrows():
             docs.append(f"Question: {row['question']} Answer: {row['answer']}")
-        
         documents = text_splitter.create_documents(docs)
-        embeddings = HuggingFaceEndpointEmbeddings(
-            model="sentence-transformers/all-MiniLM-L6-v2",
-            huggingfacehub_api_token=HUGGINGFACEHUB_API_TOKEN,
+        embeddings = HuggingFaceEmbeddings(
+            model="sentence-transformers/all-MiniLM-L6-v2"
         )
         vector_store = FAISS.from_documents(documents, embeddings)
     return vector_store
@@ -546,6 +544,10 @@ def display_faq_sidebar(df_qna=None):
     </div>
     """, unsafe_allow_html=True)
     questions = [
+        "What is 91Trucks?",
+        "who is the founder of 91trucks",
+        "how can i contact to the 91trucks",
+        "How 91trucks can help me to get good vehicle",
         "compare tata intra v30 vs tata ace gold 2.0",
         "compare mahindra zeo vs mahindra jeeto",
         "tata trucks",
@@ -553,7 +555,10 @@ def display_faq_sidebar(df_qna=None):
         "What is the primary focus of 91Trucks' digital platform?",
         "What is the significance of 91Trucks' physical retail stores?",
         "What is the role of 91Trucks in the broader logistics and transportation sectors?",
-        "What is 91Trucks?",
+        "why choose 91trucks rather than other.",
+        "what is the price of tata intra v30",
+        "show me some tata buses, trucks, auto-rickshaw",
+        "Most Expensive vehicle",
     ]
     for q in questions:
         if st.sidebar.button(q, key=f"faq_{q}"):
@@ -634,6 +639,104 @@ def process_query(prompt: str):
         st.session_state.chat_history.append({"role": "assistant", "content": greet_msg})
         return
 
+    # --- INTELLIGENT SPEC QUERY HANDLER (NEW) ---
+    import difflib
+    spec_patterns = [
+        (r'price of (.+)', 'Price', "The price of {model} is {value}.", ['price']),
+        (r'fuel type of (.+)', 'Fuel Type', "The fuel type of {model} is {value}.", ['fuel type', 'fuel']),
+        (r'seating capacity of (.+)', 'Seating Capacity', "The seating capacity of {model} is {value}.", ['seating capacity', 'seating']),
+        (r'power of (.+)', 'Power', "The power of {model} is {value}.", ['power']),
+        (r'payload of (.+)', 'Payload', "The payload of {model} is {value}.", ['payload']),
+        (r'engine of (.+)', 'Engine', "The engine of {model} is {value}.", ['engine']),
+        (r'torque of (.+)', 'Torque', "The torque of {model} is {value}.", ['torque']),
+        (r'gvw of (.+)', 'Gross Vehicle Weight', "The gross vehicle weight (GVW) of {model} is {value}.", ['gvw', 'gross vehicle weight']),
+        (r'weight of (.+)', 'Gross Vehicle Weight', "The weight of {model} is {value}.", ['weight', 'gross vehicle weight']),
+        (r'transmission of (.+)', 'Transmission', "The transmission of {model} is {value}.", ['transmission']),
+        (r'wheelbase of (.+)', 'Wheelbase', "The wheelbase of {model} is {value}.", ['wheelbase']),
+        (r'length of (.+)', 'Length', "The length of {model} is {value}.", ['length']),
+        (r'width of (.+)', 'Width', "The width of {model} is {value}.", ['width']),
+        (r'height of (.+)', 'Height', "The height of {model} is {value}.", ['height']),
+        (r'tyre of (.+)', 'Tyre', "The tyre specification of {model} is {value}.", ['tyre']),
+        (r'brake of (.+)', 'Brake', "The brake specification of {model} is {value}.", ['brake']),
+        (r'suspension of (.+)', 'Suspension', "The suspension of {model} is {value}.", ['suspension']),
+        (r'emission of (.+)', 'Emission Norms', "The emission norms of {model} is {value}.", ['emission', 'emission norms'])
+    ]
+    for pattern, field, template, alt_keywords in spec_patterns:
+        match = re.search(pattern, prompt_lower)
+        if match:
+            model_query = match.group(1).strip()
+            # Smart matching: try exact, substring, and fuzzy
+            best_match = None
+            best_score = 0
+            for name in display_names:
+                # Remove extra spaces, lower, ignore order
+                norm_model_query = ' '.join(sorted(model_query.lower().split()))
+                norm_name = ' '.join(sorted(name.lower().split()))
+                score = difflib.SequenceMatcher(None, norm_model_query, norm_name).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_match = name
+                # Also allow substring match
+                if norm_model_query in norm_name:
+                    best_match = name
+                    best_score = 1.0
+                    break
+            if best_match and best_score > 0.7:
+                vehicle_data = get_vehicle_data(best_match, df_main)
+                value = vehicle_data.get(field, "Not available") if vehicle_data else "Not available"
+                # Special handling for price: show 'Coming Soon' if not available
+                if field.lower() == "price" and (not value or str(value).strip().lower() in ["not available", "n/a", "nan", ""]):
+                    value = "Coming Soon"
+                answer = template.format(model=best_match, value=value)
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                return
+            else:
+                answer = f"Sorry, I couldn't find the {field.lower()} for {model_query.title()}."
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                return
+
+    # --- INTENT HANDLER: Vehicle name in full sentence vs direct search ---
+    found_vehicle = None
+    for name in display_names:
+        if name.lower() in prompt_lower:
+            found_vehicle = name
+            break
+    if found_vehicle:
+        # If query is exactly the vehicle name (or brand), show card as usual
+        if prompt_lower.strip() == found_vehicle.lower().strip():
+            data = get_vehicle_data(found_vehicle, df_main)
+            if data:
+                display_vehicle_card(data)
+            else:
+                st.warning(f"I'm sorry, I don't have details for '{found_vehicle}' in my current database.")
+            return
+        # If vehicle name is part of a longer sentence/question, use description + LLM
+        else:
+            data = get_vehicle_data(found_vehicle, df_main)
+            description = data.get("Description") if data else None
+            if description and description.lower() not in ["not available", "nan", "n/a", ""]:
+                llm_prompt = (
+                    f"User question: {prompt}\n"
+                    f"Vehicle: {found_vehicle}\n"
+                    f"Description: {description}\n"
+                    "Answer the user's question using the description and your own knowledge. Be concise and helpful."
+                )
+                with st.spinner("Thinking..."):
+                    result = qa_chain.invoke({"question": llm_prompt})
+                    answer = result.get("result", "Sorry, I couldn't generate an answer.")
+            else:
+                answer = (
+                    f"Sorry, I don't have enough information about {found_vehicle} to answer your question."
+                )
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            return
+
     # --- Brand match: show only top 5 vehicles for the brand ---
     normalized_prompt = normalize_vehicle_name(prompt)
     normalized_brands = {normalize_vehicle_name(brand): brand for brand in brand_names}
@@ -694,39 +797,39 @@ def process_query(prompt: str):
         return
 
     # --- 1. Handle 'most expensive'/'cheapest' queries over the entire dataset ---
-    if any(kw in prompt_lower for kw in ["most expensive", "highest price", "costliest"]):
-        # Always search the full DataFrame for numeric prices
-        df_prices = df_main[pd.to_numeric(df_main['Price'], errors='coerce').notnull()].copy()
-        if not df_prices.empty:
-            max_price = df_prices['Price'].astype(float).max()
-            rows = df_prices[df_prices['Price'].astype(float) == max_price]
-            vehicles = [get_vehicle_data(row['Vehicle Name'], df_main) for _, row in rows.iterrows()]
-            st.subheader("Most Expensive Vehicle(s):")
-            for vehicle_info in vehicles:
-                display_vehicle_card(vehicle_info)
-            return
-        else:
-            response = "No valid price data available to determine the most expensive vehicle."
-            with st.chat_message("assistant"):
-                st.markdown(response)
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
-            return
-    elif any(kw in prompt_lower for kw in ["least expensive", "cheapest", "lowest price"]):
-        df_prices = df_main[pd.to_numeric(df_main['Price'], errors='coerce').notnull()].copy()
-        if not df_prices.empty:
-            min_price = df_prices['Price'].astype(float).min()
-            rows = df_prices[df_prices['Price'].astype(float) == min_price]
-            vehicles = [get_vehicle_data(row['Vehicle Name'], df_main) for _, row in rows.iterrows()]
-            st.subheader("Cheapest Vehicle(s):")
-            for vehicle_info in vehicles:
-                display_vehicle_card(vehicle_info)
-            return
-        else:
-            response = "No valid price data available to determine the cheapest vehicle."
-            with st.chat_message("assistant"):
-                st.markdown(response)
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
-            return
+    # if any(kw in prompt_lower for kw in ["most expensive", "highest price", "costliest"]):
+    #     # Always search the full DataFrame for numeric prices
+    #     df_prices = df_main[pd.to_numeric(df_main['Price'], errors='coerce').notnull()].copy()
+    #     if not df_prices.empty:
+    #         max_price = df_prices['Price'].astype(float).max()
+    #         rows = df_prices[df_prices['Price'].astype(float) == max_price]
+    #         vehicles = [get_vehicle_data(row['Vehicle Name'], df_main) for _, row in rows.iterrows()]
+    #         st.subheader("Most Expensive Vehicle(s):")
+    #         for vehicle_info in vehicles:
+    #             display_vehicle_card(vehicle_info)
+    #         return
+    #     else:
+    #         response = "No valid price data available to determine the most expensive vehicle."
+    #         with st.chat_message("assistant"):
+    #             st.markdown(response)
+    #         st.session_state.chat_history.append({"role": "assistant", "content": response})
+    #         return
+    # elif any(kw in prompt_lower for kw in ["least expensive", "cheapest", "lowest price"]):
+    #     df_prices = df_main[pd.to_numeric(df_main['Price'], errors='coerce').notnull()].copy()
+    #     if not df_prices.empty:
+    #         min_price = df_prices['Price'].astype(float).min()
+    #         rows = df_prices[df_prices['Price'].astype(float) == min_price]
+    #         vehicles = [get_vehicle_data(row['Vehicle Name'], df_main) for _, row in rows.iterrows()]
+    #         st.subheader("Cheapest Vehicle(s):")
+    #         for vehicle_info in vehicles:
+    #             display_vehicle_card(vehicle_info)
+    #         return
+    #     else:
+    #         response = "No valid price data available to determine the cheapest vehicle."
+    #         with st.chat_message("assistant"):
+    #             st.markdown(response)
+    #         st.session_state.chat_history.append({"role": "assistant", "content": response})
+    #         return
 
     # --- 3. Handle comparison queries first ---
     if "vs" in prompt_lower or "versus" in prompt_lower:
