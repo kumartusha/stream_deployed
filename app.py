@@ -145,7 +145,7 @@ Keep the reply concise (within 80 words).
     **Answer:**
     """
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama3-70b-8192", temperature=0.5, max_tokens=2048)
+    llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama3-70b-8192", temperature=0.2, max_tokens=2048)
     return RetrievalQA.from_chain_type(llm=llm, retriever=_vector_store.as_retriever(), chain_type_kwargs={"prompt": prompt}, return_source_documents=True, input_key="question")
 
 def get_brand_models(brand_name, df, category=None):
@@ -550,6 +550,7 @@ def display_faq_sidebar(df_qna=None):
         "How 91trucks can help me to get good vehicle",
         "compare tata intra v30 vs tata ace gold 2.0",
         "compare mahindra zeo vs mahindra jeeto",
+        "Is commercial vehicle business profitable if yes then how ??",
         "tata trucks",
         "eicher trucks",
         "What is the primary focus of 91Trucks' digital platform?",
@@ -604,6 +605,19 @@ def normalize_vehicle_name(name):
     name = name.lower()
     name = re.sub(r'[^a-z0-9]', '', name)
     return name
+
+def get_vehicle_context(data):
+    # Use description if available, else build context from specs
+    description = data.get("Description", "")
+    if description and description.lower() not in ["not available", "nan", "n/a", ""]:
+        return description
+    # Build context from available specs
+    specs = []
+    for key in ["Price", "Power", "Fuel Type", "Average Rating", "Variant Name"]:
+        val = data.get(key)
+        if val and str(val).strip().lower() not in ["not available", "nan", "n/a", ""]:
+            specs.append(f"{key}: {val}")
+    return ". ".join(specs) if specs else None
 
 def process_query(prompt: str):
     response = ""
@@ -699,6 +713,35 @@ def process_query(prompt: str):
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
                 return
 
+    # --- 1. Comparison logic (should come BEFORE the intent handler) ---
+    if "vs" in prompt_lower or "compare" in prompt_lower:
+        data, error = get_vehicle_comparison_data(prompt, df_main, display_names)
+        if error:
+            response = error
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+        else:
+            v1_data, v2_data = data[0], data[1]
+            # Ensure we have data before proceeding
+            if not v1_data or not v2_data:
+                response = "I couldn't find the data for one or both vehicles. Please try again."
+                with st.chat_message("assistant"):
+                    st.markdown(response)
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
+                return
+            with st.spinner("Analyzing and generating a conclusion..."):
+                comparison_prompt = f"""
+                Please provide a very brief conclusion (under 50 words) comparing the {v1_data['Vehicle Name']} and the {v2_data['Vehicle Name']}.
+                - {v1_data['Vehicle Name']} Pros: {v1_data.get('Pros', 'N/A')}
+                - {v2_data['Vehicle Name']} Pros: {v2_data.get('Pros', 'N/A')}
+                Focus on the main differences to help a buyer choose.
+                """
+                conclusion_result = qa_chain.invoke({"question": comparison_prompt})
+                conclusion = conclusion_result.get("result", "Could not generate a conclusion.")
+            display_comparison(v1_data, v2_data, conclusion)
+        return
+
     # --- INTENT HANDLER: Vehicle name in full sentence vs direct search ---
     found_vehicle = None
     for name in display_names:
@@ -712,18 +755,18 @@ def process_query(prompt: str):
             if data:
                 display_vehicle_card(data)
             else:
-                st.warning(f"I'm sorry, I don't have details for '{found_vehicle}' in my current knowledge base.")
+                st.warning(f"I'm sorry, I don't have details for '{found_vehicle}' in my current database.")
             return
-        # If vehicle name is part of a longer sentence/question, use description + LLM
+        # If vehicle name is part of a longer sentence/question, use description/specs + LLM
         else:
             data = get_vehicle_data(found_vehicle, df_main)
-            description = data.get("Description") if data else None
-            if description and description.lower() not in ["not available", "nan", "n/a", ""]:
+            context = get_vehicle_context(data) if data else None
+            if context:
                 llm_prompt = (
                     f"User question: {prompt}\n"
                     f"Vehicle: {found_vehicle}\n"
-                    f"Description: {description}\n"
-                    "Answer the user's question using the description and your own knowledge. Be concise and helpful."
+                    f"Context: {context}\n"
+                    "Answer the user's question using the context and your own knowledge. Be concise and helpful."
                 )
                 with st.spinner("Thinking..."):
                     result = qa_chain.invoke({"question": llm_prompt})
@@ -749,7 +792,7 @@ def process_query(prompt: str):
                 if vehicle:
                     display_vehicle_card(vehicle)
                 else:
-                    st.warning(f"I'm sorry, I don't have details for a vehicle in my current knowledge base.")
+                    st.warning(f"I'm sorry, I don't have details for a vehicle in my current database.")
         else:
             st.warning(f"No vehicles found for brand '{brand.title()}'.")
         return
@@ -765,7 +808,7 @@ def process_query(prompt: str):
             if data:
                 display_vehicle_card(data)
             else:
-                st.warning(f"I'm sorry, I don't have details for '{name}' in my current knowledge base.")
+                st.warning(f"I'm sorry, I don't have details for '{name}' in my current database.")
         return
 
     # 2. Fuzzy matching for close matches (fallback)
@@ -783,7 +826,7 @@ def process_query(prompt: str):
         if data:
             display_vehicle_card(data)
         else:
-            st.warning(f"I'm sorry, I don't have details for '{best_name}' in my current knowledge base.")
+            st.warning(f"I'm sorry, I don't have details for '{best_name}' in my current database.")
         return
     elif close_matches:
         st.write("I found a few possible matches. Please confirm:")
@@ -793,7 +836,7 @@ def process_query(prompt: str):
             if data:
                 display_vehicle_card(data)
             else:
-                st.warning(f"I'm sorry, I don't have details for '{name}' in my current knowledge base.")
+                st.warning(f"I'm sorry, I don't have details for '{name}' in my current database.")
         return
 
     # --- 1. Handle 'most expensive'/'cheapest' queries over the entire dataset ---
@@ -830,38 +873,6 @@ def process_query(prompt: str):
     #             st.markdown(response)
     #         st.session_state.chat_history.append({"role": "assistant", "content": response})
     #         return
-
-    # --- 3. Handle comparison queries first ---
-    if "vs" in prompt_lower or "versus" in prompt_lower:
-        data, error = get_vehicle_comparison_data(prompt, df_main, display_names)
-        if error:
-            response = error
-            with st.chat_message("assistant"):
-                st.markdown(response)
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
-        else:
-            v1_data, v2_data = data[0], data[1]
-            # Ensure we have data before proceeding
-            if not v1_data or not v2_data:
-                response = "I couldn't find the data for one or both vehicles. Please try again."
-                with st.chat_message("assistant"):
-                    st.markdown(response)
-                st.session_state.chat_history.append({"role": "assistant", "content": response})
-                return
-
-            with st.spinner("Analyzing and generating a conclusion..."):
-                comparison_prompt = f"""
-                Please provide a very brief conclusion (under 50 words) comparing the {v1_data['Vehicle Name']} and the {v2_data['Vehicle Name']}.
-                - {v1_data['Vehicle Name']} Pros: {v1_data.get('Pros', 'N/A')}
-                - {v2_data['Vehicle Name']} Pros: {v2_data.get('Pros', 'N/A')}
-                Focus on the main differences to help a buyer choose.
-                """
-                conclusion_result = qa_chain.invoke({"question": comparison_prompt})
-                conclusion = conclusion_result.get("result", "Could not generate a conclusion.")
-            
-            # Use the new display function that includes cards, table, and conclusion
-            display_comparison(v1_data, v2_data, conclusion)
-        return
 
     # --- 4. Always search the full DataFrame for all vehicle name matches ---
     # Find all vehicles whose name is mentioned in the query
@@ -971,7 +982,7 @@ def process_query(prompt: str):
         "truck", "trucks", "van", "vans", "pickup", "pickups", "auto", "autos", "bus", "buses", "vehicle", "vehicles", "commercial", "payload", "gvw", "engine", "mileage", "fuel", "specs", "specifications", "brand", "model", "variant", "power", "capacity", "91trucks"
     ]
     if not any(word in prompt_lower for word in commercial_keywords) and not is_greeting(prompt):
-        response = "I'm a commercial vehicle assistant, so I can only answer questions about trucks, vans, and other commercial vehicles. If you have any questions about commercial vehicles, feel free to ask!"
+        response = "Hi! I'm your 91Trucks Assistant — here to help with anything related to trucks, vans, and commercial vehicles. Ask me anything about specs, prices, or models!"
         with st.chat_message("assistant"):
             st.markdown(response)
         st.session_state.chat_history.append({"role": "assistant", "content": response})
