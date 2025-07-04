@@ -1034,7 +1034,6 @@ import re
 import difflib 
 import random
 import unicodedata
-import cohere
 from sentence_transformers import SentenceTransformer
 from langchain_huggingface import HuggingFaceEmbeddings
 
@@ -1073,8 +1072,8 @@ def clean_price(price):
 
 @st.cache_data
 def load_data():
-    df_main = pd.read_csv('finalist_data.csv')
-    df_qna = pd.read_csv('91Trucks_QnAs.csv')
+    df_main = pd.read_csv('data/finalist_data.csv')
+    df_qna = pd.read_csv('data/91Trucks_QnAs.csv')
     df_main["Vehicle Image"] = df_main["Vehicle Image"].fillna("")
     df_main["Price"] = df_main["Vehicle Price"].apply(clean_price)
     return df_main, df_qna
