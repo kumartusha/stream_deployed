@@ -78,7 +78,15 @@ def get_vector_store(_df_main, _df_qna):
 @st.cache_resource
 def get_qa_chain(_vector_store):
     prompt_template = """
-    As a commercial vehicle expert, your goal is to provide detailed information and recommendations about commercial vehicles based on the provided context.
+    You are a helpful and friendly commercial vehicle expert chatbot for 91Trucks.
+        The user just greeted you. Generate a short, welcoming greeting.
+        Do not provide any vehicle information, just a polite and enthusiastic greeting that hints at your purpose.
+        Examples:
+        - "Hello there! How can I assist you with commercial vehicles today?"
+        - "Hi! Ready to talk trucks and buses? What's on your mind?"
+        - "Greetings! I'm here to help with all your commercial vehicle queries."
+
+        ### Use dynamic greeting always:
 
     When a user asks a question, follow this structured process:
 
@@ -798,23 +806,6 @@ def process_query(prompt: str):
         # If query is exactly the vehicle name (or brand), show card as usual
         if prompt_lower.strip() == found_vehicle.lower().strip():
             data = get_vehicle_data(found_vehicle, df_main)
-            # --- Begin: Vehicle-not-in-dataset logic (enforced early return) ---
-            if not data or all(data.get(field) in [None, '', 'Not available', 'Not Available', 'N/A', 'nan'] for field in ["Price", "Fuel Type", "Power", "Variant Name", "Description"]):
-                brand = None
-                for b in brand_names:
-                    if b.lower() in prompt_lower:
-                        brand = b
-                        break
-                if brand:
-                    st.warning(f"Sorry, I couldn't find '{found_vehicle}' in my database. Here are some other models from {brand} you might like:")
-                    brand_models = get_brand_models(brand, df_main)
-                    for vehicle in brand_models[:3]:
-                        if vehicle:
-                            display_vehicle_card(vehicle)
-                else:
-                    st.warning(f"Sorry, I couldn't find '{found_vehicle}' in my database.")
-                return  # Ensure no further fallback or generic message is shown
-            # --- End: Vehicle-not-in-dataset logic ---
             if data:
                 display_vehicle_card(data)
                 # Show recommendations below the main card (filter by price and category)
@@ -834,6 +825,45 @@ def process_query(prompt: str):
                         if rec_data:
                             with cols[i]:
                                 display_small_vehicle_card(rec_data)
+            else:
+                # Vehicle not found: politely deny and suggest alternatives
+                # Try to extract brand from the query
+                brand = None
+                for b in brand_names:
+                    if b.lower() in prompt_lower:
+                        brand = b
+                        break
+                st.warning(f"Sorry, I don't have information about '{found_vehicle}' at the moment.")
+                if brand:
+                    # Try to estimate price from query (if any number present)
+                    price_numbers = [float(x.replace(',', '')) for x in re.findall(r'\d+\.?\d*', prompt)]
+                    price_val = price_numbers[0] if price_numbers else None
+                    # Try to extract category from query
+                    category = extract_category(prompt_lower)
+                    # Get alternatives from same brand, similar price, and category
+                    brand_df = df_main[df_main['Brand Name'].str.lower() == brand.lower()]
+                    if price_val:
+                        brand_df = brand_df[brand_df['Price'].apply(lambda x: extract_numeric_price(x) is not None)]
+                        brand_df['price_num'] = brand_df['Price'].apply(extract_numeric_price)
+                        brand_df = brand_df[(brand_df['price_num'] >= price_val * 0.9) & (brand_df['price_num'] <= price_val * 1.1)]
+                    if category:
+                        for col in ['Category Name', 'category_name', 'Vehicle Type', 'Category']:
+                            if col in brand_df.columns:
+                                brand_df = brand_df[brand_df[col].str.lower().str.contains(category, na=False)]
+                                break
+                    brand_df = brand_df.drop_duplicates(subset=['Vehicle Name'])
+                    if not brand_df.empty:
+                        st.info(f"Here are some similar options from {brand.title()} in a similar price range:")
+                        alt_vehicles = brand_df.head(5)
+                        cols = st.columns(len(alt_vehicles))
+                        for i, (_, row) in enumerate(alt_vehicles.iterrows()):
+                            alt_data = get_vehicle_data(row['Vehicle Name'], df_main)
+                            if alt_data:
+                                with cols[i]:
+                                    display_small_vehicle_card(alt_data)
+                        return
+                # If no brand or alternatives, just show polite denial
+                st.info("Please try searching for another vehicle or brand.")
             return
         # If vehicle name is part of a longer sentence/question, use description/specs + LLM
         else:
@@ -944,46 +974,157 @@ def process_query(prompt: str):
                 st.warning(f"I'm sorry, I don't have details for '{name}' in my current database.")
         return
 
-    # --- Handle 'show N [category]' queries (e.g., 'show 10 electric buses', 'show 2 force buses') ---
-    show_n_cat_match = re.match(r"show\s+(\d+)\s+([a-zA-Z ]+)", prompt_lower)
-    if show_n_cat_match:
-        n = int(show_n_cat_match.group(1))
-        category_phrase = show_n_cat_match.group(2).strip()
-        # Try to extract main category (e.g., 'electric buses' -> 'bus' or 'buses')
-        category_keywords = ["truck", "trucks", "van", "vans", "pickup", "pickups", "auto", "autos", "bus", "buses"]
-        found_cat = None
-        for cat in category_keywords:
-            if cat in category_phrase:
-                found_cat = cat.rstrip('s')  # normalize to singular
-                break
-        # Detect brand in query
-        found_brand = None
-        for brand in brand_names:
-            if brand.lower() in category_phrase:
-                found_brand = brand
-                break
-        # Filter for electric if present
-        is_electric = 'electric' in category_phrase
-        filtered_df = df_main.copy()
-        if found_brand:
-            filtered_df = filtered_df[filtered_df['Brand Name'].str.lower() == found_brand.lower()]
-        if found_cat:
-            for col in ['Category Name', 'category_name', 'Vehicle Type', 'Category']:
-                if col in filtered_df.columns:
-                    filtered_df = filtered_df[filtered_df[col].str.lower().str.contains(found_cat, na=False)]
-        if is_electric and 'Electric' in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df['Electric'].astype(str).str.lower().str.contains('yes|true|electric', na=False)]
-        if filtered_df.empty:
-            msg = f"Sorry, I couldn't find any {category_phrase} in my database."
-            if found_brand and found_cat:
-                msg = f"Sorry, I couldn't find any {found_brand.title()} {found_cat}s in my database."
-            st.warning(msg)
-            return
-        st.subheader(f"Showing up to {n} {category_phrase}:")
-        for _, row in filtered_df.head(n).iterrows():
-            data = get_vehicle_data(row['Vehicle Name'], df_main)
+    # --- 1. Handle 'most expensive'/'cheapest' queries over the entire dataset ---
+    # if any(kw in prompt_lower for kw in ["most expensive", "highest price", "costliest"]):
+    #     # Always search the full DataFrame for numeric prices
+    #     df_prices = df_main[pd.to_numeric(df_main['Price'], errors='coerce').notnull()].copy()
+    #     if not df_prices.empty:
+    #         max_price = df_prices['Price'].astype(float).max()
+    #         rows = df_prices[df_prices['Price'].astype(float) == max_price]
+    #         vehicles = [get_vehicle_data(row['Vehicle Name'], df_main) for _, row in rows.iterrows()]
+    #         st.subheader("Most Expensive Vehicle(s):")
+    #         for vehicle_info in vehicles:
+    #             display_vehicle_card(vehicle_info)
+    #         return
+    #     else:
+    #         response = "No valid price data available to determine the most expensive vehicle."
+    #         with st.chat_message("assistant"):
+    #             st.markdown(response)
+    #         st.session_state.chat_history.append({"role": "assistant", "content": response})
+    #         return
+    # elif any(kw in prompt_lower for kw in ["least expensive", "cheapest", "lowest price"]):
+    #     df_prices = df_main[pd.to_numeric(df_main['Price'], errors='coerce').notnull()].copy()
+    #     if not df_prices.empty:
+    #         min_price = df_prices['Price'].astype(float).min()
+    #         rows = df_prices[df_prices['Price'].astype(float) == min_price]
+    #         vehicles = [get_vehicle_data(row['Vehicle Name'], df_main) for _, row in rows.iterrows()]
+    #         st.subheader("Cheapest Vehicle(s):")
+    #         for vehicle_info in vehicles:
+    #             display_vehicle_card(vehicle_info)
+    #         return
+    #     else:
+    #         response = "No valid price data available to determine the cheapest vehicle."
+    #         with st.chat_message("assistant"):
+    #             st.markdown(response)
+    #         st.session_state.chat_history.append({"role": "assistant", "content": response})
+    #         return
+
+    # --- 4. Always search the full DataFrame for all vehicle name matches ---
+    # Find all vehicles whose name is mentioned in the query
+    found_vehicles = []
+    for name in display_names:
+        if name.lower() in prompt_lower:
+            data = get_vehicle_data(name, df_main)
             if data:
-                display_vehicle_card(data)
+                found_vehicles.append(data)
+    
+    if found_vehicles:
+        st.subheader(f"Found {len(found_vehicles)} matching vehicle(s) in your query:")
+        for vehicle_info in found_vehicles:
+            display_vehicle_card(vehicle_info)
+        return
+    
+    # Fallback for partial name suggestions if no direct name was found
+    suggestions = get_display_name_suggestion(prompt, display_names, df_main)
+    if suggestions:
+        display_suggestions(suggestions)
+        return
+
+    # --- 5. Brand/Family Query (set brand context, even if not in data) ---
+    family_brand = is_family_query(prompt_lower, brand_names)
+    category = extract_category(prompt_lower)
+    if family_brand and family_brand in brand_names:
+        st.session_state.last_brand_context = prompt_lower
+        st.session_state.last_vehicle_name = None
+        with st.spinner(f"Finding popular models for {family_brand.title()}..."):
+            brand_models = get_brand_models(family_brand, df_main, category=category)
+            if not brand_models:
+                response = f"Sorry, I couldn't find any models for the brand {family_brand.title()} in the {category or 'selected'} category."
+            else:
+                display_brand_summary(family_brand, brand_models)
+                return
+        if response:
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            return
+
+    # --- 6. Pronoun/helping verb follow-up (use brand context) ---
+    brand_context = st.session_state.get('last_brand_context', None)
+    if is_pronoun_followup(prompt_lower) and brand_context:
+        with st.spinner(f"Finding popular models for your previous brand query..."):
+            brand = is_family_query(brand_context, brand_names)
+            cat = extract_category(brand_context)
+            if brand and brand in brand_names:
+                brand_models = get_brand_models(brand, df_main, category=cat)
+                if not brand_models:
+                    response = f"Sorry, I couldn't find any models for the brand {brand.title()} in the {cat or 'selected'} category."
+                else:
+                    display_brand_summary(brand, brand_models)
+                    return
+            else:
+                response = "Sorry, I couldn't determine the previous brand context."
+        if response:
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            return
+
+    # --- 7. Brand Name Query (exact match) ---
+    if prompt_lower in brand_names:
+        st.session_state.last_brand_context = prompt_lower
+        st.session_state.last_vehicle_name = None
+        with st.spinner(f"Finding popular models for {prompt_lower.title()}..."):
+            brand_models = get_brand_models(prompt_lower, df_main)
+            if not brand_models:
+                response = f"Sorry, I couldn't find any models for the brand {prompt_lower.title()}."
+            else:
+                display_brand_summary(prompt_lower, brand_models)
+                return
+        if response:
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            return
+
+    # --- 8. Reasons to buy queries for specific vehicles ---
+    if any(keyword in prompt_lower for keyword in ["reasons to buy", "why buy", "should i buy", "pros of", "benefits of"]) and (vehicle_name := find_vehicle_in_text(prompt, display_names)):
+        st.session_state.last_vehicle_name = vehicle_name
+        st.session_state.last_brand_context = None
+        data = get_vehicle_data(vehicle_name, df_main)
+        with st.spinner("Analyzing reasons to buy..."):
+            reasons_prompt = f"What are the key reasons to buy the {vehicle_name}? Focus on its benefits, pros, and unique selling points. Keep it concise but informative."
+            result = qa_chain.invoke({"question": reasons_prompt})
+            answer = result.get("result", f"Here are some reasons to consider the {vehicle_name}.")
+        display_vehicle_with_llm_response(data, answer)
+        return
+
+    # --- 9. Exact QnA Match ---
+    qna_answer = find_qna_answer(prompt, df_qna)
+    if qna_answer:
+        with st.chat_message("assistant"):
+            st.markdown(qna_answer)
+        st.session_state.chat_history.append({"role": "assistant", "content": qna_answer})
+        return
+
+    # 4a. If no direct QnA match, use QnA CSV as context for LLM
+    # Only do this for questions about 91trucks/company/brand (not for vehicle specs etc.)
+    if any(x in prompt.lower() for x in ["91trucks", "91 trucks", "founder", "company", "contact", "about", "who is", "what is", "help", "support"]):
+        # Limit to top 10 QnA pairs for context to avoid overloading the LLM
+        qna_context = ""
+        for _, row in df_qna.head(10).iterrows():
+            qna_context += f"Q: {row['question']}\nA: {row['answer']}\n"
+        llm_prompt = (
+            f"User question: {prompt}\n"
+            f"Here are some Q&A pairs from the 91Trucks dataset:\n{qna_context}\n"
+            "Answer the user's question using the Q&A pairs above and your own knowledge. Be concise and helpful."
+        )
+        with st.spinner("Thinking..."):
+            result = qa_chain.invoke({"question": llm_prompt})
+            answer = result.get("result", "Sorry, I couldn't generate an answer.")
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
         return
 
     # --- 10. Fallback to LLM for general queries, but always prefer CSV data ---
@@ -991,11 +1132,10 @@ def process_query(prompt: str):
         "truck", "trucks", "van", "vans", "pickup", "pickups", "auto", "autos", "bus", "buses", "vehicle", "vehicles", "commercial", "payload", "gvw", "engine", "mileage", "fuel", "specs", "specifications", "brand", "model", "variant", "power", "capacity", "91trucks"
     ]
     if not any(word in prompt_lower for word in commercial_keywords) and not is_greeting(prompt):
-        fallback_msg = ("I'm your commercial vehicle assistant for 91Trucks. I can help you with trucks, buses, autos, and related queries. "
-                       "Please ask about vehicles that are available in our dataset or listed on 91Trucks.")
+        response = "I'm a commercial vehicle and 91Trucks assistant. I can help with trucks, buses, autos, and related queries. Please ask about vehicles or 91Trucks."
         with st.chat_message("assistant"):
-            st.markdown(f"**{fallback_msg}**")
-        st.session_state.chat_history.append({"role": "assistant", "content": fallback_msg})
+            st.markdown(response)
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
         return
 
     with st.spinner("Thinking..."):
@@ -1008,8 +1148,18 @@ def process_query(prompt: str):
         st.markdown(response)
     st.session_state.chat_history.append({"role": "assistant", "content": response})
 
+    # --- LLM fallback for any general/unhandled question ---
+    # llm_fallback_prompt = f"User question: {prompt}\nUse the 91Trucks dataset and your own knowledge to answer in a helpful, natural way."
+    # with st.spinner("Thinking..."):
+    #     result = qa_chain.invoke({"question": llm_fallback_prompt})
+    #     answer = result.get("result", "Sorry, I couldn't generate an answer.")
+    # with st.chat_message("assistant"):
+    #     st.markdown(answer)
+    # st.session_state.chat_history.append({"role": "assistant", "content": answer})
+    # return
+
 # --- User Input Handling ---
-if prompt := st.chat_input("Ask about a vehicle, e.g., 'Tata Intra v30 vs Mahindra Jeeto'"):
+if prompt := st.chat_input("Ask about a vehicle, e.g., 'Tata Ace vs Mahindra Jeeto'"):
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
